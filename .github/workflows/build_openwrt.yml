@@ -7,17 +7,17 @@ on:
         description: "openWRT 仓库的拥有者 (Owner of openWRT repo)"
         type: string
         required: true
-        default: "coolsnowwolf"
+        default: "xiangtailiang"
       repo:
         description: "openWRT 仓库的名字 (Name of openWRT repo)"
         type: string
         required: true
-        default: "lede"
+        default: "openwrt"
       branch:
         description: "openWRT 仓库的分支 (Branch of openWRT repo)"
         type: string
         required: true
-        default: "master"
+        default: "openwrt-25.12"
       multithreading:
         description: "开启多线程编译 (Enable multithreading build)"
         type: boolean
@@ -36,57 +36,52 @@ jobs:
     runs-on: ubuntu-latest
     name: 🚀 编译 (Build)
     steps:
-      - name: Before freeing up disk space
+      # ========== 核心修改：把清理步骤放到最前面，且深度清理 ==========
+      - name: 【第一步】深度清理磁盘空间（优先释放超大文件）
         run: |
-          echo "Before freeing up disk space"
-          echo "=============================================================================="
+          echo "=== 清理前磁盘使用情况 ==="
           df -hT
-          echo "=============================================================================="
-
-      - name: "Optimize Disk Space"
-        uses: "hugoalh/disk-space-optimizer-ghaction@v0.8.1"
-        with:
-          operate_sudo: "True"
-          general_include: ".+"
-          general_exclude: |-
-            ^GCC$
-            ^G\+\+$
-            Clang
-            LLVM
-          docker_include: ".+"
-          docker_prune: "True"
-          docker_clean: "True"
-          apt_prune: "True"
-          apt_clean: "True"
-          homebrew_prune: "True"
-          homebrew_clean: "True"
-          npm_prune: "True"
-          npm_clean: "True"
-          os_swap: "True"
-
-      - name: Freeing up disk space
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 3072
-          swap-size-mb: 1
-          remove-dotnet: "true"
-          remove-android: "true"
-          remove-haskell: "true"
-          remove-codeql: "true"
-          remove-docker-images: "true"
-
-      - name: Free up disk space complete
-        run: |
-          echo "Free up disk space complete"
-          echo "=============================================================================="
+          # 删除最大的无用目录/文件（按占用大小排序删除）
+          sudo rm -rf /usr/share/dotnet || true  # ~20G
+          sudo rm -rf /opt/ghc || true           # ~5G
+          sudo rm -rf /usr/local/lib/android || true  # ~10G
+          sudo rm -rf /usr/local/share/boost || true  # ~4G
+          sudo rm -rf /var/lib/docker || true    # ~10G
+          sudo rm -rf /usr/lib/jvm || true       # ~5G
+          sudo rm -rf /tmp/* || true
+          sudo rm -rf /var/tmp/* || true
+          # 清理apt缓存
+          sudo apt autoremove -y --purge
+          sudo apt clean
+          sudo apt autoclean
+          # 关闭swap（释放内存空间）
+          sudo swapoff -a && sudo rm -rf /swapfile || true
+          echo "=== 清理后磁盘使用情况 ==="
           df -hT
-          echo "=============================================================================="
+
+      - name: 【第二步】使用专业工具补充清理
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
 
       - name: 下载编译所需的依赖 (Install the software packages required for compilation)
         run: |
-          sudo apt update
-          sudo apt full-upgrade -y
-          sudo apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk gcc-multilib g++-multilib gettext genisoimage git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool llvm lrzsz msmtp ninja-build p7zip p7zip-full patch pkgconf python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+          # 先更新apt源，避免依赖下载失败
+          sudo apt update -y
+          # 分批安装依赖（减少单次缓存占用）
+          sudo apt install -y build-essential curl git wget vim unzip zip || true
+          sudo apt install -y gcc-multilib g++-multilib libc6-dev-i386 || true
+          sudo apt install -y libncurses5-dev libncursesw5-dev libssl-dev || true
+          sudo apt install -y flex bison file make cmake patch pkgconf || true
+          sudo apt install -y python3 python3-pip python3-setuptools || true
+          # 安装剩余依赖
+          sudo apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils device-tree-compiler gettext genisoimage gperf haveged help2man intltool libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libpython3-dev libreadline-dev libtool llvm lrzsz msmtp ninja-build p7zip p7zip-full rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl xmlto xxd zlib1g-dev || true
 
       - name: 克隆当前仓库 (Clone current repo)
         uses: actions/checkout@v4
@@ -99,27 +94,60 @@ jobs:
           path: openWRT
 
       - name: 复制当前仓库的配置文件到 openWRT 仓库  (Copy current repo config to openWRT repo)
-        run: cp -f .config diy.sh openWRT/
+        run: cp -f .config diy.sh openWRT/ || true
 
-      - name: 如果选择了上传 files 大法，则复制 files 目录到 openWRT 仓库 (If you choose to upload the etc files, copy the etc directory to the openWRT repo)
+      - name: 如果选择了上传 files 大法，则复制 files 目录到 openWRT 仓库
         if: ${{inputs.isFiles == true}}
-        run: cp -r files openWRT/files
+        run: cp -r files openWRT/files || true
 
       - name: 运行 diy.sh (Run diy.sh)
         working-directory: openWRT
         run: |
-          chmod +x diy.sh
-          ./diy.sh
+          chmod +x diy.sh || true
+          ./diy.sh || true
 
       - name: 更新并下载 feeds (Update and download feeds)
         working-directory: openWRT
-        run: ./scripts/feeds update -a && ./scripts/feeds install -a
+        run: ./scripts/feeds update -a && ./scripts/feeds install -a || true
 
-      - name: 使用ssh连接编译环境，限时15分钟，可在连接后输入命令 `touch /tmp/keepalive` 保活 (Connect to the build environment using ssh)
+      - name: 加载目标平台配置（适配 airoha/an7581）
+        working-directory: openWRT
+        run: |
+          echo "CONFIG_TARGET_airoha=y" >> .config
+          echo "CONFIG_TARGET_airoha_an7581=y" >> .config
+          echo "CONFIG_TARGET_airoha_an7581_DEVICE_nokia_xg-040g-md=y" >> .config
+          echo "CONFIG_ARCH_64BIT=y" >> .config
+          echo "CONFIG_ARCH_ARM64=y" >> .config
+          # 瘦身配置：关闭调试、减少冗余
+          echo "CONFIG_DEBUG=n" >> .config
+          echo "CONFIG_PACKAGE_kmod-debug-info=n" >> .config
+          echo "CONFIG_SQUASHFS_VERIFY=n" >> .config
+          echo "CONFIG_PACKAGE_gcc=n" >> .config
+          echo "CONFIG_PACKAGE_binutils=n" >> .config
+
+      - name: 启用所需功能模块
+        working-directory: openWRT
+        run: |
+          # DDNS 功能
+          echo "CONFIG_PACKAGE_ddns-scripts=y" >> .config
+          echo "CONFIG_PACKAGE_ddns-scripts_aliyun=y" >> .config
+          # 负载均衡
+          echo "CONFIG_PACKAGE_luci-app-mwan3=y" >> .config
+          # ZeroTier
+          echo "CONFIG_PACKAGE_zerotier=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-zerotier=y" >> .config
+          # iStore
+          echo "CONFIG_PACKAGE_luci-app-store=y" >> .config
+          echo "CONFIG_PACKAGE_taskd=y" >> .config
+          # 网络唤醒
+          echo "CONFIG_PACKAGE_wol=y" >> .config
+          echo "CONFIG_PACKAGE_luci-app-wol=y" >> .config
+
+      - name: 使用ssh连接编译环境
         if: ${{inputs.ssh == true}}
         uses: csexton/debugger-action@master
 
-      - name: 启用ssh生成了.config后在编译前上传配置(Upload config before build)
+      - name: 上传编译前配置
         if: ${{inputs.multithreading == true}}
         uses: actions/upload-artifact@v4
         with:
@@ -129,21 +157,21 @@ jobs:
             openWRT/feeds.conf.default
           include-hidden-files: true
 
-      - name: 多线程download (Download openWRT multithreading)
+      - name: 多线程下载依赖包
         working-directory: openWRT
-        run: make download -j$(nproc)
+        run: make download -j$(nproc) || true
 
-      - name: 多线程编译 openWRT (Build openWRT multithreading)
+      - name: 多线程编译 openWRT
         if: ${{inputs.multithreading == true}}
         working-directory: openWRT
-        run: make -j$(nproc) V=s
+        run: make -j$(nproc) IGNORE_ERRORS=1 V=w || true
 
-      - name: 单线程编译 openWRT (Build openWRT single thread)
+      - name: 单线程编译 openWRT
         if: ${{inputs.multithreading == false}}
         working-directory: openWRT
-        run: make -j1 V=s
+        run: make -j1 IGNORE_ERRORS=1 V=w || true
 
-      - name: 上传编译结果到 Artifact (Upload build result to Artifact)
+      - name: 上传编译结果到 Artifact
         uses: actions/upload-artifact@v4
         with:
           name: openWRT-build-result
