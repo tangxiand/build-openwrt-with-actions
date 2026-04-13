@@ -1,178 +1,206 @@
-name: 🚀 编译 openwrt(Build openwrt)
+#
+# Copyright (c) 2019-2020 P3TERX <https://p3terx.com>
+#
+# This is free software, licensed under the MIT License.
+# See /LICENSE for more information.
+#
+# https://github.com/P3TERX/Actions-OpenWrt
+# Description: Build OpenWrt using GitHub Actions
+#
+
+name: Build OpenWrt
 
 on:
+  repository_dispatch:
   workflow_dispatch:
     inputs:
-      owner:
-        description: "openWRT 仓库的拥有者 (Owner of openWRT repo)"
-        type: string
-        required: true
-        default: "xiangtailiang"
-      repo:
-        description: "openWRT 仓库的名字 (Name of openWRT repo)"
-        type: string
-        required: true
-        default: "openwrt"
-      branch:
-        description: "openWRT 仓库的分支 (Branch of openWRT repo)"
-        type: string
-        required: true
-        default: "openwrt-25.12"
-      multithreading:
-        description: "开启多线程编译 (Enable multithreading build)"
-        type: boolean
-        default: true
       ssh:
-        description: "使用 ssh 连接到编译环境 (Connect to the build environment using ssh)"
+        description: 'SSH connection to Actions'
+        required: false
+        default: 'false'
         type: boolean
-        default: false
-      isFiles:
-        description: "使用files大法 (Whether to upload the etc files)"
-        type: boolean
-        default: false
+  schedule:
+    - cron: 0 8 * * 1
+
+env:
+  REPO_URL: https://github.com/immortalwrt/immortalwrt
+  REPO_BRANCH: master
+  FEEDS_CONF: feeds.conf.default
+  CONFIG_FILE: .config
+  DIY_P1_SH: diy-part1.sh
+  DIY_P2_SH: diy-part2.sh
+  UPLOAD_BIN_DIR: true
+  UPLOAD_FIRMWARE: true
+  UPLOAD_RELEASE: true
+  TZ: Asia/Shanghai
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    name: 🚀 编译 (Build)
+    runs-on: ubuntu-22.04
+
     steps:
-      # ========== 核心修改：把清理步骤放到最前面，且深度清理 ==========
-      - name: 【第一步】深度清理磁盘空间（优先释放超大文件）
-        run: |
-          echo "=== 清理前磁盘使用情况 ==="
-          df -hT
-          # 删除最大的无用目录/文件（按占用大小排序删除）
-          sudo rm -rf /usr/share/dotnet || true  # ~20G
-          sudo rm -rf /opt/ghc || true           # ~5G
-          sudo rm -rf /usr/local/lib/android || true  # ~10G
-          sudo rm -rf /usr/local/share/boost || true  # ~4G
-          sudo rm -rf /var/lib/docker || true    # ~10G
-          sudo rm -rf /usr/lib/jvm || true       # ~5G
-          sudo rm -rf /tmp/* || true
-          sudo rm -rf /var/tmp/* || true
-          # 清理apt缓存
-          sudo apt autoremove -y --purge
-          sudo apt clean
-          sudo apt autoclean
-          # 关闭swap（释放内存空间）
-          sudo swapoff -a && sudo rm -rf /swapfile || true
-          echo "=== 清理后磁盘使用情况 ==="
-          df -hT
+    - name: Checkout
+      uses: actions/checkout@main
 
-      - name: 【第二步】使用专业工具补充清理
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: true
+    - name: Initialization environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        dpkg-query -Wf '${Installed-Size}\t${Package}\n' | sort -n | tail -n 100
+        df -h
+        echo "Removing large packages"
+        sudo apt-get remove -y '^dotnet-.*'
+        sudo apt-get remove -y '^llvm-.*'
+        sudo apt-get remove -y 'php.*'
+        sudo apt-get remove -y '^mongodb-.*'
+        sudo apt-get remove -y '^mysql-.*'
+        sudo apt-get remove -y azure-cli google-cloud-sdk google-chrome-stable firefox powershell mono-devel libgl1-mesa-dri
+        sudo apt-get autoremove -y
+        sudo apt-get clean
+        df -h
+        echo "Removing large directories"
+        sudo rm -rf /usr/share/dotnet/
+        sudo rm -rf /usr/local/graalvm/
+        sudo rm -rf /usr/local/.ghcup/
+        sudo rm -rf /usr/local/share/powershell
+        sudo rm -rf /usr/local/share/chromium
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /usr/local/lib/node_modules
+        df -h
+        sudo -E apt-get -qq update
+        sudo apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+          bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext gcc-multilib \
+          g++-multilib git gnutls-dev gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev \
+          libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5 \
+          libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lld llvm lrzsz mkisofs msmtp \
+          nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pip python3-ply \
+          python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig \
+          texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+        sudo -E apt-get -qq autoremove --purge
+        sudo -E apt-get -qq clean
+        sudo timedatectl set-timezone "$TZ"
+        sudo mkdir -p /workdir
+        sudo chown $USER:$GROUPS /workdir
 
-      - name: 下载编译所需的依赖 (Install the software packages required for compilation)
-        run: |
-          # 先更新apt源，避免依赖下载失败
-          sudo apt update -y
-          # 分批安装依赖（减少单次缓存占用）
-          sudo apt install -y build-essential curl git wget vim unzip zip || true
-          sudo apt install -y gcc-multilib g++-multilib libc6-dev-i386 || true
-          sudo apt install -y libncurses5-dev libncursesw5-dev libssl-dev || true
-          sudo apt install -y flex bison file make cmake patch pkgconf || true
-          sudo apt install -y python3 python3-pip python3-setuptools || true
-          # 安装剩余依赖
-          sudo apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils device-tree-compiler gettext genisoimage gperf haveged help2man intltool libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libpython3-dev libreadline-dev libtool llvm lrzsz msmtp ninja-build p7zip p7zip-full rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl xmlto xxd zlib1g-dev || true
+    - name: Clone source code
+      working-directory: /workdir
+      run: |
+        df -hT $PWD
+        git clone $REPO_URL -b $REPO_BRANCH openwrt
+        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
+        tar zxvf $GITHUB_WORKSPACE/XG-040G-MD.tar.gz -C /workdir/openwrt
 
-      - name: 克隆当前仓库 (Clone current repo)
-        uses: actions/checkout@v4
+    - name: Enable build ccache
+      uses: klever1988/cachewrtbuild@main
+      with:
+        ccache: 'true'
+        mixkey: 'immortalwrt-xg040gmd-612'
+        prefix: ${{ github.workspace }}/openwrt
 
-      - name: 克隆 openWRT 仓库 (Clone openWRT repo)
-        uses: actions/checkout@v4
-        with:
-          repository: "${{inputs.owner}}/${{inputs.repo}}"
-          ref: ${{inputs.branch}}
-          path: openWRT
+    - name: Load custom feeds
+      run: |
+        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
+        chmod +x $DIY_P1_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P1_SH
+   
+    - name: Update feeds
+      run: cd openwrt && ./scripts/feeds update -a
 
-      - name: 复制当前仓库的配置文件到 openWRT 仓库  (Copy current repo config to openWRT repo)
-        run: cp -f .config diy.sh openWRT/ || true
+    - name: Install feeds
+      run: cd openwrt && ./scripts/feeds install -a
 
-      - name: 如果选择了上传 files 大法，则复制 files 目录到 openWRT 仓库
-        if: ${{inputs.isFiles == true}}
-        run: cp -r files openWRT/files || true
+    - name: Load custom configuration
+      run: |
+        [ -e files ] && mv files openwrt/files
+        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE openwrt/.config
+        chmod +x $DIY_P2_SH
+        cd openwrt
+        $GITHUB_WORKSPACE/$DIY_P2_SH
 
-      - name: 运行 diy.sh (Run diy.sh)
-        working-directory: openWRT
-        run: |
-          chmod +x diy.sh || true
-          ./diy.sh || true
+    - name: SSH connection to Actions
+      uses: P3TERX/ssh2actions@v1.0.0
+      if: (github.event.inputs.ssh == 'true' && github.event.inputs.ssh  != 'false') || contains(github.event.action, 'ssh')
+      env:
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
 
-      - name: 更新并下载 feeds (Update and download feeds)
-        working-directory: openWRT
-        run: ./scripts/feeds update -a && ./scripts/feeds install -a || true
+    - name: Download package
+      id: package
+      run: |
+        cd openwrt
+        make defconfig
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
 
-      - name: 加载目标平台配置（适配 airoha/an7581）
-        working-directory: openWRT
-        run: |
-          echo "CONFIG_TARGET_airoha=y" >> .config
-          echo "CONFIG_TARGET_airoha_an7581=y" >> .config
-          echo "CONFIG_TARGET_airoha_an7581_DEVICE_nokia_xg-040g-md=y" >> .config
-          echo "CONFIG_ARCH_64BIT=y" >> .config
-          echo "CONFIG_ARCH_ARM64=y" >> .config
-          # 瘦身配置：关闭调试、减少冗余
-          echo "CONFIG_DEBUG=n" >> .config
-          echo "CONFIG_PACKAGE_kmod-debug-info=n" >> .config
-          echo "CONFIG_SQUASHFS_VERIFY=n" >> .config
-          echo "CONFIG_PACKAGE_gcc=n" >> .config
-          echo "CONFIG_PACKAGE_binutils=n" >> .config
+    - name: Compile the firmware
+      id: compile
+      run: |
+        cd openwrt
+        echo -e "$(nproc) thread compile"
+        make -j$(nproc) || make -j1 || make -j1 V=s
+        echo "status=success" >> $GITHUB_OUTPUT
+        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
+        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
+        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+        
+    - name: Check space usage
+      if: (!cancelled())
+      run: df -hT
 
-      - name: 启用所需功能模块
-        working-directory: openWRT
-        run: |
-          # DDNS 功能
-          echo "CONFIG_PACKAGE_ddns-scripts=y" >> .config
-          echo "CONFIG_PACKAGE_ddns-scripts_aliyun=y" >> .config
-          # 负载均衡
-          echo "CONFIG_PACKAGE_luci-app-mwan3=y" >> .config
-          # ZeroTier
-          echo "CONFIG_PACKAGE_zerotier=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-zerotier=y" >> .config
-          # iStore
-          echo "CONFIG_PACKAGE_luci-app-store=y" >> .config
-          echo "CONFIG_PACKAGE_taskd=y" >> .config
-          # 网络唤醒
-          echo "CONFIG_PACKAGE_wol=y" >> .config
-          echo "CONFIG_PACKAGE_luci-app-wol=y" >> .config
+    - name: Upload bin directory
+      uses: actions/upload-artifact@main
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
+      with:
+        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: openwrt/bin
 
-      - name: 使用ssh连接编译环境
-        if: ${{inputs.ssh == true}}
-        uses: csexton/debugger-action@master
+    - name: Organize files
+      id: organize
+      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      run: |
+        cd openwrt/bin/targets/*/*
+        rm -rf packages
+        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
 
-      - name: 上传编译前配置
-        if: ${{inputs.multithreading == true}}
-        uses: actions/upload-artifact@v4
-        with:
-          name: config-before-build
-          path: |
-            openWRT/.config
-            openWRT/feeds.conf.default
-          include-hidden-files: true
+    - name: Upload firmware directory
+      uses: actions/upload-artifact@main
+      if: steps.organize.outputs.status == 'success' && !cancelled()
+      with:
+        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        path: ${{ env.FIRMWARE }}
 
-      - name: 多线程下载依赖包
-        working-directory: openWRT
-        run: make download -j$(nproc) || true
+    - name: Generate release tag
+      id: tag
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      run: |
+        echo "release_tag=XG-040G-MD-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        touch release.txt
+        echo "status=success" >> $GITHUB_OUTPUT
 
-      - name: 多线程编译 openWRT
-        if: ${{inputs.multithreading == true}}
-        working-directory: openWRT
-        run: make -j$(nproc) IGNORE_ERRORS=1 V=w || true
+    - name: Upload firmware to release
+      uses: softprops/action-gh-release@v1
+      if: steps.tag.outputs.status == 'success' && !cancelled()
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.tag.outputs.release_tag }}
+        body_path: release.txt
+        files: ${{ env.FIRMWARE }}/*
 
-      - name: 单线程编译 openWRT
-        if: ${{inputs.multithreading == false}}
-        working-directory: openWRT
-        run: make -j1 IGNORE_ERRORS=1 V=w || true
+    - name: Delete workflow runs
+      uses: Mattraks/delete-workflow-runs@main
+      with:
+        retain_days: 1
+        keep_minimum_runs: 3
 
-      - name: 上传编译结果到 Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: openWRT-build-result
-          path: openWRT/bin/targets
+    - name: Remove old Releases
+      uses: dev-drprasad/delete-older-releases@v0.2.1
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      with:
+        keep_latest: 5
+        delete_tags: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
